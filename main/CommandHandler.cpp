@@ -916,6 +916,26 @@ int getTime(const uint8_t command[], uint8_t response[])
   return 5 + sizeof(now);
 }
 
+int setTime(const uint8_t command[], uint8_t response[])
+{
+  //[0]     CMD_START   < 0xE0   >
+  //[1]     Command     < 1 byte >
+  //[2]     N args      < 1 byte >
+  //[3]     time size   < 1 byte >
+  //[4]     time        < 4 byte >
+  time_t unixtime;
+  memcpy(&unixtime, &command[4], sizeof(unixtime));
+
+  timeval epoch = {unixtime, 0};
+  int ret = settimeofday((const timeval*)&epoch, 0);
+
+  response[2] = 1; // number of parameters
+  response[3] = 1; // parameter 1 length
+  response[4] = ret;
+
+  return 6;
+}
+
 int getIdxBSSID(const uint8_t command[], uint8_t response[])
 {
   uint8_t bssid[6];
@@ -2165,7 +2185,7 @@ const CommandHandlerType commandHandlers[] = {
   setEnt, NULL, NULL, NULL, sendDataTcp, getDataBufTcp, insertDataBuf, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 
   // 0x50 -> 0x5f
-  setPinMode, setDigitalWrite, setAnalogWrite, getDigitalRead, getAnalogRead, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  setPinMode, setDigitalWrite, setAnalogWrite, getDigitalRead, getAnalogRead, setTime, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 
   // 0x60 -> 0x6f
   writeFile, readFile, deleteFile, existsFile, downloadFile,  applyOTA, renameFile, downloadOTA, brSetECTrustAnchor, brErrorCode, NULL, NULL, NULL, NULL, NULL, NULL,
