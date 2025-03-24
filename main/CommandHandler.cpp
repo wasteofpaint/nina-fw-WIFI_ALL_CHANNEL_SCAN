@@ -2185,7 +2185,7 @@ const CommandHandlerType commandHandlers[] = {
   setEnt, NULL, NULL, NULL, sendDataTcp, getDataBufTcp, insertDataBuf, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 
   // 0x50 -> 0x5f
-  setPinMode, setDigitalWrite, setAnalogWrite, getDigitalRead, getAnalogRead, setTime, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  setPinMode, setDigitalWrite, setAnalogWrite, getDigitalRead, getAnalogRead, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, setTime,
 
   // 0x60 -> 0x6f
   writeFile, readFile, deleteFile, existsFile, downloadFile,  applyOTA, renameFile, downloadOTA, brSetECTrustAnchor, brErrorCode, NULL, NULL, NULL, NULL, NULL, NULL,
