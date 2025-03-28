@@ -68,8 +68,8 @@ int WiFiClient::connect(IPAddress ip, uint16_t port)
   addr.sin_port = htons(port);
 
   if (_connTimeout == 0) {
-    if (lwip_connect_r(_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-      lwip_close_r(_socket);
+    if (lwip_connect(_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+      lwip_close(_socket);
       _socket = -1;
       return 0;
     }
@@ -79,10 +79,10 @@ int WiFiClient::connect(IPAddress ip, uint16_t port)
   lwip_ioctl(_socket, FIONBIO, &nonBlocking);
 
   if (_connTimeout > 0) {
-    int res = lwip_connect_r(_socket, (struct sockaddr*)&addr, sizeof(addr));
+    int res = lwip_connect(_socket, (struct sockaddr*)&addr, sizeof(addr));
     if (res < 0 && errno != EINPROGRESS) {
       ESP_LOGW("WiFiClient", "connect on socket %d, errno: %d, \"%s\"", _socket, errno, strerror(errno));
-      lwip_close_r(_socket);
+      lwip_close(_socket);
       _socket = -1;
       return 0;
     }
@@ -98,12 +98,12 @@ int WiFiClient::connect(IPAddress ip, uint16_t port)
     res = select(_socket + 1, nullptr, &fdset, nullptr, &tv);
     if (res < 0) {
       ESP_LOGW("WiFiClient", "select on socket %d, errno: %d, \"%s\"", _socket, errno, strerror(errno));
-      lwip_close_r(_socket);
+      lwip_close(_socket);
       return 0;
     }
     if (res == 0) {
       ESP_LOGW("WiFiClient", "select returned due to timeout %d ms for socket %d", _connTimeout,  _socket);
-      lwip_close_r(_socket);
+      lwip_close(_socket);
       return 0;
     }
     int sockerr;
@@ -111,12 +111,12 @@ int WiFiClient::connect(IPAddress ip, uint16_t port)
     res = lwip_getsockopt(_socket, SOL_SOCKET, SO_ERROR, &sockerr, &len);
     if (res < 0) {
       ESP_LOGW("WiFiClient", "getsockopt on socket %d, errno: %d, \"%s\"", _socket, errno, strerror(errno));
-      lwip_close_r(_socket);
+      lwip_close(_socket);
       return 0;
     }
     if (sockerr != 0) {
       ESP_LOGW("WiFiClient", "socket error on socket %d, errno: %d, \"%s\"", _socket, sockerr, strerror(sockerr));
-      lwip_close_r(_socket);
+      lwip_close(_socket);
       return 0;
     }
   }
