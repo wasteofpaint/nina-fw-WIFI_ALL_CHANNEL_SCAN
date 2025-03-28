@@ -78,11 +78,11 @@ void WiFiServer::end()
   if (_socket != -1) {
     for (int i = 0; i < CONFIG_LWIP_MAX_SOCKETS; i++) {
       if (_spawnedSockets[i] != -1) {
-        lwip_close_r(_spawnedSockets[i]);
+        lwip_close(_spawnedSockets[i]);
         _spawnedSockets[i] = -1;
       }
     }
-    lwip_close_r(_socket);
+    lwip_close(_socket);
     _socket = -1;
   }
   _accepted_sock = -1;
