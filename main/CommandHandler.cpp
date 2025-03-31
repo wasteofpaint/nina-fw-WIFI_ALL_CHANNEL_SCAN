@@ -891,6 +891,18 @@ int getFwVersion(const uint8_t command[], uint8_t response[])
   return 11;
 }
 
+int getFwVersionU32(const uint8_t command[], uint8_t response[])
+{
+  response[2] = 1; // number of parameters
+  response[3] = 4; // parameter 1 length
+
+  sscanf(FIRMWARE_VERSION, "%hhu.%hhu.%hhu", &response[4], &response[5], &response[6]);
+
+  response[7] = 0;
+
+  return 9;
+}
+
 int sendUDPdata(const uint8_t command[], uint8_t response[])
 {
   uint8_t socket = command[4];
@@ -2898,7 +2910,7 @@ const CommandHandlerType commandHandlers[] = {
   pref_getType,     // 0x5D
 
   // 0x5E -> 0x5F
-  NULL, setTime,
+  getFwVersionU32, setTime,
 
   // 0x60 -> 0x6f
   writeFile, readFile, deleteFile, existsFile, downloadFile,  applyOTA, renameFile, downloadOTA, brSetECTrustAnchor, brErrorCode, NULL, NULL, NULL, NULL, NULL, NULL,
