@@ -150,7 +150,7 @@ void loop() {
     return;
   }
 
-  if (debug) {
+  if (debug > 1) {
     dumpBuffer("COMMAND", commandBuffer, commandLength);
   }
 
@@ -160,7 +160,7 @@ void loop() {
 
   SPIS.transfer(responseBuffer, NULL, responseLength);
 
-  if (debug) {
+  if (debug > 1) {
     dumpBuffer("RESPONSE", responseBuffer, responseLength);
   }
 }
