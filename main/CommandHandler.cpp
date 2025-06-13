@@ -1738,6 +1738,14 @@ int brSetECTrustAnchor(const uint8_t command[], uint8_t response[])
   memcpy(customTrustAnchor.pkey.key.ec.q, &command[13 + dnSize], keySize);
   customTrustAnchor.pkey.key.ec.qlen = keySize;
 
+  ESP_LOGI("TA_DN_LEN", "%d", customTrustAnchor.dn.len);
+  ESP_LOG_BUFFER_HEX("TA_DN", customTrustAnchor.dn.data, customTrustAnchor.dn.len);
+  ESP_LOGI("TA_FLAGS", "0x%02X", customTrustAnchor.flags);
+  ESP_LOGI("TA_CURVE_TYPE", "0x%02X", customTrustAnchor.pkey.key_type);
+  ESP_LOGI("TA_CURVE", "0x%02X", customTrustAnchor.pkey.key.ec.curve);
+  ESP_LOGI("TA_EC_LEN", "%d", customTrustAnchor.pkey.key.ec.qlen);
+  ESP_LOG_BUFFER_HEX("TA_EC", customTrustAnchor.pkey.key.ec.q, customTrustAnchor.pkey.key.ec.qlen);
+
   bearsslClient.setTrustAnchors(&customTrustAnchor, 1);
   response[4] = 1;
 
