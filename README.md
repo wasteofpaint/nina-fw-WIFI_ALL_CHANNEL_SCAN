@@ -47,6 +47,14 @@ python combine.py
 ```
 This produces `NINA_W102.bin` file (a different name can be specified as parameter). To flash this file you can use https://arduino.github.io/arduino-fwuploader/2.2/usage/#firmware-flashing
 
+## Releases
+Firmware releases are available [here](https://github.com/arduino/nina-fw/releases).
+
+After validation they will be added to the [arduino-fwuploader](https://github.com/arduino/arduino-fwuploader) in the [NINA](https://github.com/arduino/arduino-fwuploader/tree/main/firmwares/NINA) directory. The firmware can be flashed from IDE 2 using the Firmware Updater tool.
+
+Firmware releases used by the IDE 1 were added to the [WiFi101-FirmwareUpdater-Plugin](https://github.com/arduino/WiFi101-FirmwareUpdater-Plugin) in the [NINA](https://github.com/arduino/WiFi101-FirmwareUpdater-Plugin/tree/master/firmwares/NINA) directory.
+
+
 ## Build a new certificate list (based on the Google Android root CA list)
 ```bash
 git clone https://android.googlesource.com/platform/system/ca-certificates
