@@ -1717,7 +1717,7 @@ int brSetECTrustAnchor(const uint8_t command[], uint8_t response[])
   response[3] = 1;
   response[4] = 0;
 
-  uint8_t dnSize = command[4];
+  uint16_t dnSize =  command[3] << 8 | command[4];
   customTrustAnchor.dn.data = (unsigned char*)malloc(dnSize);
   if(customTrustAnchor.dn.data == NULL){
     return 6;
@@ -1729,7 +1729,7 @@ int brSetECTrustAnchor(const uint8_t command[], uint8_t response[])
   customTrustAnchor.pkey.key_type = BR_KEYTYPE_EC;
   customTrustAnchor.pkey.key.ec.curve = command[10 + dnSize];
 
-  uint8_t keySize = command[12 + dnSize];
+  uint16_t keySize = command[11 + dnSize] << 8 | command[12 + dnSize];
   customTrustAnchor.pkey.key.ec.q = (unsigned char*)malloc(keySize);
   if(customTrustAnchor.pkey.key.ec.q == NULL){
     free(customTrustAnchor.dn.data);
@@ -1737,6 +1737,14 @@ int brSetECTrustAnchor(const uint8_t command[], uint8_t response[])
   }
   memcpy(customTrustAnchor.pkey.key.ec.q, &command[13 + dnSize], keySize);
   customTrustAnchor.pkey.key.ec.qlen = keySize;
+
+  ESP_LOGI("TA_DN_LEN", "%d", customTrustAnchor.dn.len);
+  ESP_LOG_BUFFER_HEX("TA_DN", customTrustAnchor.dn.data, customTrustAnchor.dn.len);
+  ESP_LOGI("TA_FLAGS", "0x%02X", customTrustAnchor.flags);
+  ESP_LOGI("TA_CURVE_TYPE", "0x%02X", customTrustAnchor.pkey.key_type);
+  ESP_LOGI("TA_CURVE", "0x%02X", customTrustAnchor.pkey.key.ec.curve);
+  ESP_LOGI("TA_EC_LEN", "%d", customTrustAnchor.pkey.key.ec.qlen);
+  ESP_LOG_BUFFER_HEX("TA_EC", customTrustAnchor.pkey.key.ec.q, customTrustAnchor.pkey.key.ec.qlen);
 
   bearsslClient.setTrustAnchors(&customTrustAnchor, 1);
   response[4] = 1;
