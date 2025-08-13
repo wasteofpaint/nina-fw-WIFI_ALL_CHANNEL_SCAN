@@ -38,6 +38,7 @@ extern "C" {
 
 #include <SPIS.h>
 #include <WiFi.h>
+#include <NTP.h>
 
 #include "CommandHandler.h"
 
@@ -110,7 +111,16 @@ void setup() {
 // #define UNO_WIFI_REV2
 
 unsigned long getTime() {
-  return time(nullptr);
+  unsigned long xtime = 0;
+  xtime = time(nullptr);
+  if (xtime > 946684800) {
+    ESP_LOGI("getTime", "xtime = %lu", xtime);
+    return xtime;
+  }
+  WiFiUDP ntpClient;
+  xtime = NTP::getTime(ntpClient);
+  ESP_LOGW("getTime", "xtime = %lu", xtime);
+  return xtime;
 }
 
 void setupWiFi() {
