@@ -43,8 +43,6 @@ extern "C" {
 
 #define SPI_BUFFER_LEN SPI_MAX_DMA_LEN
 
-#define CONFIG_CONSOLE_UART_NUM 0
-
 int debug = 0;
 
 uint8_t* commandBuffer;
@@ -152,7 +150,7 @@ void loop() {
     return;
   }
 
-  if (debug) {
+  if (debug > 1) {
     dumpBuffer("COMMAND", commandBuffer, commandLength);
   }
 
@@ -162,7 +160,7 @@ void loop() {
 
   SPIS.transfer(responseBuffer, NULL, responseLength);
 
-  if (debug) {
+  if (debug > 1) {
     dumpBuffer("RESPONSE", responseBuffer, responseLength);
   }
 }
