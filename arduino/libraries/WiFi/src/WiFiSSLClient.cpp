@@ -95,14 +95,37 @@ int WiFiSSLClient::connect(const char* host, uint16_t port, bool sni)
       return 0;
     }
 
-    ret = esp_crt_bundle_attach(&_sslConfig);
-    if (ret != ESP_OK) {
-      return 0;
-    }
+    /* Starting from firmware 3.x.x cert partition starts at address 0xA000.
+     * The arduino-fw-uploader tool uploads user certificates in PEM format to a
+     * fixed flash address 0x10000. If you change again the partition table make
+     * sure 0x10000 is in the range of your certs partition.
+     * To make fimrware 3.x.x compatible with arduino-fw-uploader we first check
+     * for PEM certificate at address 0x10000, if no valid certificate is found
+     * we try to load the default certificate bundle from address 0xA000
+     */
+    const bool hasPEM = (memcmp(&certs_data[0x6000], "-----BEGIN CERTIFICATE-----", 26) == 0);
 
-    ret = esp_crt_bundle_set(certs_data, CRT_BUNDLE_SIZE);
-    if (ret != ESP_OK) {
-      return 0;
+    if (hasPEM) {
+      ets_printf("Using provided certificate in pem format\n");
+      ret = mbedtls_x509_crt_parse(&_caCrt, &certs_data[0x6000], strlen((const char*)&certs_data[0x6000]) + 1);
+      if (ret < 0) {
+        ets_printf("mbedtls_x509_crt_parse failed: %d\n", ret);
+        stop();
+      }
+      mbedtls_ssl_conf_ca_chain(&_sslConfig, &_caCrt, NULL);
+    } else {
+      ets_printf("Using bundled certificate\n");
+      ret = esp_crt_bundle_attach(&_sslConfig);
+      if (ret != ESP_OK) {
+        stop();
+        return 0;
+      }
+
+      ret = esp_crt_bundle_set(certs_data, CRT_BUNDLE_SIZE);
+      if (ret != ESP_OK) {
+        stop();
+        return 0;
+      }
     }
 
     mbedtls_ssl_conf_rng(&_sslConfig, mbedtls_ctr_drbg_random, &_ctrDrbgContext);

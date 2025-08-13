@@ -29,8 +29,6 @@ int downloadAndSaveFile(char * url, FILE * f, const char * cert_pem)
   if(cert_pem != NULL) {
     config.cert_pem = cert_pem;
   } else {
-    config.crt_bundle_attach = esp_crt_bundle_attach;
-
     const esp_partition_t* part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "certs");
     if (part == NULL) {
       return 0;
@@ -41,14 +39,30 @@ int downloadAndSaveFile(char * url, FILE * f, const char * cert_pem)
       return 0;
     }
 
-    ret = esp_crt_bundle_attach(&config);
-    if (ret != ESP_OK) {
-      return 0;
-    }
+    /* Starting from firmware 3.x.x cert partition starts at address 0xA000.
+     * The arduino-fw-uploader tool uploads user certificates in PEM format to a
+     * fixed flash address 0x10000. If you change again the partition table make
+     * sure 0x10000 is in the range of your certs partition.
+     * To make fimrware 3.x.x compatible with arduino-fw-uploader we first check
+     * for PEM certificate at address 0x10000, if no valid certificate is found
+     * we try to load the default certificate bundle from address 0xA000
+     */
+    const bool hasPEM = (memcmp(&certs_data[0x6000], "-----BEGIN CERTIFICATE-----", 26) == 0);
 
-    ret = esp_crt_bundle_set(certs_data, CRT_BUNDLE_SIZE);
-    if (ret != ESP_OK) {
-      return 0;
+    if (hasPEM) {
+      config.cert_pem = (const char*)&certs_data[0x6000];
+    } else {
+      config.crt_bundle_attach = esp_crt_bundle_attach;
+
+      ret = esp_crt_bundle_attach(&config);
+      if (ret != ESP_OK) {
+        return 0;
+      }
+
+      ret = esp_crt_bundle_set(certs_data, CRT_BUNDLE_SIZE);
+      if (ret != ESP_OK) {
+        return 0;
+      }
     }
   }
 
