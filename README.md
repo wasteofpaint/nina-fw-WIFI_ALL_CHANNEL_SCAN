@@ -4,9 +4,9 @@ This firmware uses [Espressif's IDF](https://github.com/espressif/esp-idf)
 
 ## Building
 
-1. [Download the ESP32 toolchain](http://esp-idf.readthedocs.io/en/v3.3.1/get-started/index.html#setup-toolchain)
+1. [Download the ESP32 toolchain](http://esp-idf.readthedocs.io/en/v4.4.8/get-started/index.html#setup-toolchain)
 1. Extract it and add it to your `PATH`: `export PATH=$PATH:<path/to/toolchain>/bin`
-1. Clone **v3.3.1** of the IDF: `git clone --branch v3.3.1 --recursive https://github.com/espressif/esp-idf.git`
+1. Clone **v4.4.8** of the IDF: `git clone --branch v4.4.8 --recursive https://github.com/espressif/esp-idf.git`
 1. Set the `IDF_PATH` environment variable: `export IDF_PATH=<path/to/idf>`
 1. Run `make` to build the firmware (in the directory of this read me). You may want to add different depending on the target board.
     1. `RELEASE=1 make` for MKR WiFi 1010 and Nano 33 IoT
