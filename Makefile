@@ -2,11 +2,19 @@ PROJECT_NAME := nina-fw
 
 EXTRA_COMPONENT_DIRS := $(PWD)/arduino
 
-CPPFLAGS += -DARDUINO
+CMD_GEN_BUNDLE = $(shell python $(PWD)/tools/gen_crt_bundle.py -i $(PWD)/data/cacrt_all.pem)
+CMD_BUNDLE_SIZE = $(shell stat -L -c %s ./x509_crt_bundle)
+READ_BUNDLE_SIZE = $(eval BUNDLE_SIZE=$(CMD_BUNDLE_SIZE))
+
+$(CMD_GEN_BUNDLE)
+$(READ_BUNDLE_SIZE)
+$(info SIZEIS $(BUNDLE_SIZE))
+
+CPPFLAGS += -DARDUINO -DCRT_BUNDLE_SIZE=$(BUNDLE_SIZE)
 
 ifeq ($(RELEASE),1)
-CFLAGS += -DNDEBUG -DCONFIG_FREERTOS_ASSERT_DISABLE -Os -DLOG_LOCAL_LEVEL=0
-CPPFLAGS += -DNDEBUG -Os
+CFLAGS += -DNDEBUG -DCONFIG_FREERTOS_ASSERT_DISABLE -DLOG_LOCAL_LEVEL=0
+CPPFLAGS += -DNDEBUG
 $(info RELEASE)
 endif
 
@@ -27,4 +35,8 @@ include $(IDF_PATH)/make/project.mk
 firmware: all
 	python combine.py
 
-.PHONY: firmware
+clean:
+	rm -rf NINA_W102*
+	rm -rf x509_crt_bundle
+
+.PHONY: firmware, clean

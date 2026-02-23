@@ -17,7 +17,7 @@
   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-#include <rom/uart.h>
+#include <esp32/rom/uart.h>
 
 extern "C" {
   #include <driver/periph_ctrl.h>
@@ -31,12 +31,14 @@ extern "C" {
   #include <sys/types.h>
   #include <dirent.h>
   #include "esp_partition.h"
+  #include "soc/gpio_periph.h"
 }
 
 #include <Arduino.h>
 
 #include <SPIS.h>
 #include <WiFi.h>
+#include <NTP.h>
 
 #include "CommandHandler.h"
 
@@ -88,7 +90,6 @@ void setDebug(int d) {
 }
 
 void setupWiFi();
-void setupBluetooth();
 
 void setup() {
   setDebug(debug);
@@ -104,60 +105,31 @@ void setup() {
   digitalWrite(27, HIGH);
 #endif
 
-  pinMode(5, INPUT);
-  if (digitalRead(5) == LOW) {
-    setupBluetooth();
-  } else {
-    setupWiFi();
-  }
+  setupWiFi();
 }
 
 // #define UNO_WIFI_REV2
 
-void setupBluetooth() {
-  periph_module_enable(PERIPH_UART1_MODULE);
-  periph_module_enable(PERIPH_UHCI0_MODULE);
-
-#if defined(UNO_WIFI_REV2)
-  uart_set_pin(UART_NUM_1, 1, 3, 33, 0); // TX, RX, RTS, CTS
-#elif defined(NANO_RP2040_CONNECT)
-  uart_set_pin(UART_NUM_1, 1, 3, 33, 12); // TX, RX, RTS, CTS
-#else
-  uart_set_pin(UART_NUM_1, 23, 12, 18, 5);
-#endif
-  uart_set_hw_flow_ctrl(UART_NUM_1, UART_HW_FLOWCTRL_CTS_RTS, 5);
-
-  esp_bt_controller_config_t btControllerConfig = BT_CONTROLLER_INIT_CONFIG_DEFAULT(); 
-
-  btControllerConfig.hci_uart_no = UART_NUM_1;
-#if defined(UNO_WIFI_REV2) || defined(NANO_RP2040_CONNECT)
-  btControllerConfig.hci_uart_baudrate = 115200;
-#else
-  btControllerConfig.hci_uart_baudrate = 912600;
-#endif
-
-  esp_bt_controller_init(&btControllerConfig);
-  while (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE);
-  esp_bt_controller_enable(ESP_BT_MODE_BLE);
-  esp_bt_sleep_enable();
-
-  vTaskSuspend(NULL);
-
-  while (1) {
-    vTaskDelay(portMAX_DELAY);
-  }
-}
-
 unsigned long getTime() {
-  int ret = 0;
-  do {
-    ret = WiFi.getTime();
-  } while (ret == 0);
-  return ret;
+  unsigned long xtime = 0;
+  xtime = time(nullptr);
+  if (xtime > 946684800) {
+    ESP_LOGI("getTime", "xtime = %lu", xtime);
+    return xtime;
+  }
+  WiFiUDP ntpClient;
+  xtime = NTP::getTime(ntpClient);
+  ESP_LOGW("getTime", "xtime = %lu", xtime);
+  return xtime;
 }
 
 void setupWiFi() {
-  esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
+  esp_err_t ret = ESP_OK;
+
+  if((ret = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT)) != ESP_OK) {
+    ets_printf("failed esp_bt_controller_mem_release %s\n", esp_err_to_name(ret));
+  }
+
   SPIS.begin();
 
   esp_vfs_spiffs_conf_t conf = {
@@ -167,7 +139,7 @@ void setupWiFi() {
     .format_if_mount_failed = true
   };
 
-  esp_err_t ret = esp_vfs_spiffs_register(&conf);
+  ret = esp_vfs_spiffs_register(&conf);
 
   if (WiFi.status() == WL_NO_SHIELD) {
     while (1); // no shield
@@ -188,7 +160,7 @@ void loop() {
     return;
   }
 
-  if (debug) {
+  if (debug > 1) {
     dumpBuffer("COMMAND", commandBuffer, commandLength);
   }
 
@@ -198,7 +170,7 @@ void loop() {
 
   SPIS.transfer(responseBuffer, NULL, responseLength);
 
-  if (debug) {
+  if (debug > 1) {
     dumpBuffer("RESPONSE", responseBuffer, responseLength);
   }
 }
