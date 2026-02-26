@@ -41,6 +41,8 @@ uint8_t WiFiServer::begin(uint16_t port)
   if (_socket < 0) {
     return 0;
   }
+  int enable = 1;
+  setsockopt(_socket, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int));
 
   struct sockaddr_in addr;
   memset(&addr, 0x00, sizeof(addr));
@@ -50,24 +52,40 @@ uint8_t WiFiServer::begin(uint16_t port)
   addr.sin_port = htons(port);
 
   if (lwip_bind(_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-    lwip_close_r(_socket);
+    lwip_close(_socket);
     _socket = -1;
     return 0;
   }
 
   if (lwip_listen(_socket, 1) < 0) {
-    lwip_close_r(_socket);
+    lwip_close(_socket);
     _socket = -1;
     return 0;
   }
 
   int nonBlocking = 1;
-  lwip_ioctl_r(_socket, FIONBIO, &nonBlocking);
+  lwip_ioctl(_socket, FIONBIO, &nonBlocking);
 
   // Set port.
   _port = port;
 
   return 1;
+}
+
+
+void WiFiServer::end()
+{
+  if (_socket != -1) {
+    for (int i = 0; i < CONFIG_LWIP_MAX_SOCKETS; i++) {
+      if (_spawnedSockets[i] != -1) {
+        lwip_close(_spawnedSockets[i]);
+        _spawnedSockets[i] = -1;
+      }
+    }
+    lwip_close(_socket);
+    _socket = -1;
+  }
+  _accepted_sock = -1;
 }
 
 WiFiClient WiFiServer::available(uint8_t* status)

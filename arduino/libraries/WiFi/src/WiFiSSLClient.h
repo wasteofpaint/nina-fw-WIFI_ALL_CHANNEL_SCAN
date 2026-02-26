@@ -55,11 +55,12 @@ public:
   virtual /*IPAddress*/uint32_t remoteIP();
   virtual uint16_t remotePort();
 
+  void setConnectionTimeout(uint16_t timeout) {_connTimeout = timeout;}
+
 private:
   int connect(const char* host, uint16_t port, bool sni);
 
 private:
-  static const char* ROOT_CAs;
 
   mbedtls_entropy_context _entropyContext;
   mbedtls_ctr_drbg_context _ctrDrbgContext;
@@ -69,6 +70,7 @@ private:
   mbedtls_x509_crt _caCrt;
   bool _connected;
   int _peek;
+  uint16_t _connTimeout = 0;
 
   SemaphoreHandle_t _mbedMutex;
 };

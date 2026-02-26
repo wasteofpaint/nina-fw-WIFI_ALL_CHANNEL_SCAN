@@ -36,12 +36,14 @@
 #include "ECCX08Cert.h"
 
 #include "esp_log.h"
+#include "driver/adc_deprecated.h"
+#include <lwip/priv/sockets_priv.h>
 
 #ifdef LWIP_PROVIDE_ERRNO
 int errno;
 #endif
 
-const char FIRMWARE_VERSION[6] = "2.0.0";
+const char FIRMWARE_VERSION[6] = "3.0.1";
 
 /*IPAddress*/uint32_t resolvedHostname;
 
@@ -55,6 +57,7 @@ WiFiServer tcpServers[MAX_SOCKETS];
 
 WiFiClient bearssl_tcp_client;
 BearSSLClient bearsslClient(bearssl_tcp_client, ArduinoIoTCloudTrustAnchor, ArduinoIoTCloudTrustAnchor_NUM);
+br_x509_trust_anchor customTrustAnchor;
 
 int setNet(const uint8_t command[], uint8_t response[])
 {
@@ -438,6 +441,32 @@ int startServerTcp(const uint8_t command[], uint8_t response[])
   return 6;
 }
 
+int stopServerTcp(const uint8_t command[], uint8_t response[])
+{
+  uint8_t socket = command[4];
+
+  for (int i = 0; i < CONFIG_LWIP_MAX_SOCKETS; i++) {
+    WiFiClient c(tcpServers[socket].getSpawnedClient(i));
+    if (c) {
+      for (int j = 0; j < MAX_SOCKETS; j++) {
+        if (tcpClients[j] == c) {
+          socketTypes[j] = 255;
+          tcpClients[i] = WiFiClient();
+          break;
+        }
+      }
+    }
+  }
+  tcpServers[socket].end();
+  socketTypes[socket] = 255;
+
+  response[2] = 1; // number of parameters
+  response[3] = 1; // parameter 1 length
+  response[4] = 1; // parameter 1 length
+
+  return 6;
+}
+
 int getStateTcp(const uint8_t command[], uint8_t response[])
 {
   uint8_t socket = command[4];
@@ -611,6 +640,7 @@ int startClientTcp(const uint8_t command[], uint8_t response[])
   uint16_t port;
   uint8_t socket;
   uint8_t type;
+  uint16_t timeout = 0;
 
   memset(host, 0x00, sizeof(host));
 
@@ -627,10 +657,15 @@ int startClientTcp(const uint8_t command[], uint8_t response[])
     port = ntohs(port);
     socket = command[13 + command[3]];
     type = command[15 + command[3]];
+    if (command[2] == 6) { // optional sixth parameter
+      timeout = (uint16_t) command[17 + command[3]] << 8 | command[18 + command[3]];
+    }
   }
 
   if (type == 0x00) {
     int result;
+
+    tcpClients[socket].setConnectionTimeout(timeout);
 
     if (host[0] != '\0') {
       result = tcpClients[socket].connect(host, port);
@@ -676,6 +711,8 @@ int startClientTcp(const uint8_t command[], uint8_t response[])
   } else if (type == 0x02) {
     int result;
 
+    tlsClients[socket].setConnectionTimeout(timeout);
+
     if (host[0] != '\0') {
       result = tlsClients[socket].connect(host, port);
     } else {
@@ -699,6 +736,8 @@ int startClientTcp(const uint8_t command[], uint8_t response[])
     int result;
 
     configureECCx08();
+
+    static_cast<WiFiClient*>(bearsslClient.getClient())->setConnectionTimeout(timeout);
 
     if (host[0] != '\0') {
       result = bearsslClient.connect(host, port);
@@ -852,6 +891,18 @@ int getFwVersion(const uint8_t command[], uint8_t response[])
   return 11;
 }
 
+int getFwVersionU32(const uint8_t command[], uint8_t response[])
+{
+  response[2] = 1; // number of parameters
+  response[3] = 4; // parameter 1 length
+
+  sscanf(FIRMWARE_VERSION, "%hhu.%hhu.%hhu", &response[4], &response[5], &response[6]);
+
+  response[7] = 0;
+
+  return 9;
+}
+
 int sendUDPdata(const uint8_t command[], uint8_t response[])
 {
   uint8_t socket = command[4];
@@ -913,6 +964,26 @@ int getTime(const uint8_t command[], uint8_t response[])
   return 5 + sizeof(now);
 }
 
+int setTime(const uint8_t command[], uint8_t response[])
+{
+  //[0]     CMD_START   < 0xE0   >
+  //[1]     Command     < 1 byte >
+  //[2]     N args      < 1 byte >
+  //[3]     time size   < 1 byte >
+  //[4]     time        < 4 byte >
+  time_t unixtime;
+  memcpy(&unixtime, &command[4], sizeof(unixtime));
+
+  timeval epoch = {unixtime, 0};
+  int ret = settimeofday((const timeval*)&epoch, 0);
+
+  response[2] = 1; // number of parameters
+  response[3] = 1; // parameter 1 length
+  response[4] = ret;
+
+  return 6;
+}
+
 int getIdxBSSID(const uint8_t command[], uint8_t response[])
 {
   uint8_t bssid[6];
@@ -967,7 +1038,7 @@ int setEnt(const uint8_t command[], uint8_t response[])
     char password[128 + 1];
     char identity[128 + 1];
     const char* rootCA;
-    
+
     memset(username, 0x00, sizeof(username));
     memset(password, 0x00, sizeof(password));
     memset(identity, 0x00, sizeof(identity));
@@ -1616,6 +1687,87 @@ ota_cleanup:
   return 6;
 }
 
+int brSetECTrustAnchor(const uint8_t command[], uint8_t response[])
+{
+  //[0]          CMD_START   < 0xE0   >
+  //[1]          Command     < 1 byte >
+  //[2]          N args      < 1 byte >
+  //[3]          dn size     < 1 byte MSB >
+  //[4]          dn size     < 1 byte LSB >
+  //[5]          dn          < dn size bytes >
+  //[[5] + 5]    flags size  < 1 byte >
+  //[[5] + 6]    flags       < 1 byte MSB >
+  //[[5] + 7]    flags       < 1 byte LSB >
+  //[[5] + 8]    curve size  < 1 byte >
+  //[[5] + 9]    curve       < 1 byte MSB >
+  //[[5] + 10]   curve       < 1 byte LSB >
+  //[[5] + 11]   key size    < 1 byte MSB >
+  //[[5] + 12]   key size    < 1 byte LSB >
+  //[[5] + 13]   key         < key size bytes >
+
+  if(customTrustAnchor.dn.data != NULL){
+    free(customTrustAnchor.dn.data);
+  }
+
+  if(customTrustAnchor.pkey.key.ec.q != NULL){
+    free(customTrustAnchor.pkey.key.ec.q);
+  }
+
+  response[2] = 1;
+  response[3] = 1;
+  response[4] = 0;
+
+  uint16_t dnSize =  command[3] << 8 | command[4];
+  customTrustAnchor.dn.data = (unsigned char*)malloc(dnSize);
+  if(customTrustAnchor.dn.data == NULL){
+    return 6;
+  }
+  memcpy(customTrustAnchor.dn.data, &command[5], dnSize);
+  customTrustAnchor.dn.len = dnSize;
+
+  customTrustAnchor.flags = command[7 + dnSize];
+  customTrustAnchor.pkey.key_type = BR_KEYTYPE_EC;
+  customTrustAnchor.pkey.key.ec.curve = command[10 + dnSize];
+
+  uint16_t keySize = command[11 + dnSize] << 8 | command[12 + dnSize];
+  customTrustAnchor.pkey.key.ec.q = (unsigned char*)malloc(keySize);
+  if(customTrustAnchor.pkey.key.ec.q == NULL){
+    free(customTrustAnchor.dn.data);
+    return 6;
+  }
+  memcpy(customTrustAnchor.pkey.key.ec.q, &command[13 + dnSize], keySize);
+  customTrustAnchor.pkey.key.ec.qlen = keySize;
+
+  ESP_LOGI("TA_DN_LEN", "%d", customTrustAnchor.dn.len);
+  ESP_LOG_BUFFER_HEX("TA_DN", customTrustAnchor.dn.data, customTrustAnchor.dn.len);
+  ESP_LOGI("TA_FLAGS", "0x%02X", customTrustAnchor.flags);
+  ESP_LOGI("TA_CURVE_TYPE", "0x%02X", customTrustAnchor.pkey.key_type);
+  ESP_LOGI("TA_CURVE", "0x%02X", customTrustAnchor.pkey.key.ec.curve);
+  ESP_LOGI("TA_EC_LEN", "%d", customTrustAnchor.pkey.key.ec.qlen);
+  ESP_LOG_BUFFER_HEX("TA_EC", customTrustAnchor.pkey.key.ec.q, customTrustAnchor.pkey.key.ec.qlen);
+
+  bearsslClient.setTrustAnchors(&customTrustAnchor, 1);
+  response[4] = 1;
+
+  return 6;
+}
+
+int brErrorCode(const uint8_t command[], uint8_t response[])
+{
+  //[0]     CMD_START   < 0xE0   >
+  //[1]     Command     < 1 byte >
+  //[2]     N args      < 1 byte >
+
+  int result = bearsslClient.errorCode();
+  int len = sizeof(result);
+
+  response[2] = 1;   // number of parameters
+  response[3] = len; // parameter 1 length
+  memcpy(&response[4], &result, sizeof(result));
+
+  return len + 5;
+}
+
 //
 // Low-level BSD-like sockets functions
 //
@@ -1651,7 +1803,7 @@ int socket_close(const uint8_t command[], uint8_t response[])
   uint8_t sock = command[4];
 
   errno = 0;
-  int ret = lwip_close_r(sock);
+  int ret = lwip_close(sock);
 
   response[2] = 1; // number of parameters
   response[3] = 1; // parameter 1 length
@@ -1690,7 +1842,7 @@ int socket_bind(const uint8_t command[], uint8_t response[])
   addr.sin_port = port;
 
   errno = 0;
-  int ret = lwip_bind_r(sock, (struct sockaddr*) &addr, sizeof(addr));
+  int ret = lwip_bind(sock, (struct sockaddr*) &addr, sizeof(addr));
 
   response[2] = 1; // number of parameters
   response[3] = 1; // parameter 1 length
@@ -1711,7 +1863,7 @@ int socket_listen(const uint8_t command[], uint8_t response[])
   uint8_t backlog = command[6];
 
   errno = 0;
-  int ret = lwip_listen_r(sock, backlog);
+  int ret = lwip_listen(sock, backlog);
 
   response[2] = 1; // number of parameters
   response[3] = 1; // parameter 1 length
@@ -1732,7 +1884,7 @@ int socket_accept(const uint8_t command[], uint8_t response[])
   socklen_t addr_len = sizeof(addr);
 
   errno = 0;
-  int8_t ret = lwip_accept_r(sock, (struct sockaddr *) &addr, &addr_len);
+  int8_t ret = lwip_accept(sock, (struct sockaddr *) &addr, &addr_len);
 
   response[2] = 3; // number of parameters
   response[3] = 1; // parameter 1 length
@@ -1773,7 +1925,7 @@ int socket_connect(const uint8_t command[], uint8_t response[])
   addr.sin_port = port;
 
   errno = 0;
-  int ret = lwip_connect_r(sock, (struct sockaddr*)&addr, sizeof(addr));
+  int ret = lwip_connect(sock, (struct sockaddr*)&addr, sizeof(addr));
 
   response[2] = 1; // number of parameters
   response[3] = 1; // parameter 1 length
@@ -1794,7 +1946,7 @@ int socket_send(const uint8_t command[], uint8_t response[])
   uint16_t size = lwip_ntohs(*((uint16_t *) &command[6]));
 
   errno = 0;
-  int16_t ret = lwip_send_r(sock, &command[8], size, 0);
+  int16_t ret = lwip_send(sock, &command[8], size, 0);
   ret = (ret < 0) ? 0 : ret;
 
   response[2] = 1; // number of parameters
@@ -1818,7 +1970,7 @@ int socket_recv(const uint8_t command[], uint8_t response[])
   size = LWIP_MIN(size, (SPI_MAX_DMA_LEN-16));
 
   errno = 0;
-  int16_t ret = lwip_recv_r(sock, &response[5], size, 0);
+  int16_t ret = lwip_recv(sock, &response[5], size, 0);
   ret = (ret < 0) ? 0 : ret;
 
   response[2] = 1; // number of parameters
@@ -1853,7 +2005,7 @@ int socket_sendto(const uint8_t command[], uint8_t response[])
   addr.sin_port = port;
 
   errno = 0;
-  int16_t ret = lwip_sendto_r(sock, &command[18], size, 0, (struct sockaddr*)&addr, sizeof(addr));
+  int16_t ret = lwip_sendto(sock, &command[18], size, 0, (struct sockaddr*)&addr, sizeof(addr));
   ret = (ret < 0) ? 0 : ret;
 
   response[2] = 1; // number of parameters
@@ -1879,7 +2031,7 @@ int socket_recvfrom(const uint8_t command[], uint8_t response[])
   socklen_t addr_len = sizeof(addr);
 
   errno = 0;
-  int16_t ret = lwip_recvfrom_r(sock, &response[15], size, 0, (struct sockaddr *) &addr, &addr_len);
+  int16_t ret = lwip_recvfrom(sock, &response[15], size, 0, (struct sockaddr *) &addr, &addr_len);
   ret = (ret < 0) ? 0 : ret;
 
   response[2] = 3; // number of parameters
@@ -1920,7 +2072,7 @@ int socket_ioctl(const uint8_t command[], uint8_t response[])
   memcpy(argval, &command[11], size);
 
   errno = 0;
-  int ret = lwip_ioctl_r(sock, cmd, argval);
+  int ret = lwip_ioctl(sock, cmd, argval);
   if (ret == -1) {
       size = 0;
   }
@@ -2004,7 +2156,7 @@ int socket_setsockopt(const uint8_t command[], uint8_t response[])
   memcpy(&optval, &command[11], optlen);
 
   errno = 0;
-  int ret = lwip_setsockopt_r(sock, SOL_SOCKET, optname, optval, optlen);
+  int ret = lwip_setsockopt(sock, SOL_SOCKET, optname, optval, optlen);
 
   response[2] = 1; // number of parameters
   response[3] = 1; // parameter 1 length
@@ -2029,7 +2181,7 @@ int socket_getsockopt(const uint8_t command[], uint8_t response[])
   uint8_t optval[LWIP_SETGETSOCKOPT_MAXOPTLEN];
 
   errno = 0;
-  int ret = lwip_getsockopt_r(sock, SOL_SOCKET, optname, optval, &optlen);
+  int ret = lwip_getsockopt(sock, SOL_SOCKET, optname, optval, &optlen);
   if (ret == -1) {
       optlen = 0;
   }
@@ -2070,6 +2222,661 @@ int socket_getpeername(const uint8_t command[], uint8_t response[])
   return 14;
 }
 
+/*
+ * Preferences API
+ */
+#include "Preferences.h"
+
+Preferences preferences;
+const char PREF_TAG[] = "preferences";
+
+int pref_begin(const uint8_t command[], uint8_t response[])
+{
+
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+  //[2]         N args                      < 1 byte >
+  //[3]         store_name size             < 1 byte >
+  //[4..n]      store_name                  < n byte >
+  //[n+1]       readonly                    < 1 byte >
+  //[n+2]       partition label size        < 1 byte >
+  //[n+3..n+m]  partition label             < m byte >
+
+  uint8_t nargs = command[2];
+  char store_name[32];
+  char partition_label[32];
+  const uint8_t* partition_label_ptr = nullptr;
+  bool readonly=false;
+
+  // command_ptr points to the next argument, in this case
+  // it points to the length of store_name string
+  const uint8_t* command_ptr = &command[3];
+
+  if(nargs < 1 && nargs > 3) {
+    ESP_LOGE(PREF_TAG, "Preferences begin wrong number of arguments");
+    response[4] = 255;
+    goto error;
+  }
+
+  memset(store_name, 0x00, sizeof(store_name));
+  memcpy(store_name, command_ptr+1, *command_ptr);
+  store_name[*command_ptr] = '\0';
+
+  // move the pointer to the next argument, by adding the length
+  // of store_name string
+  command_ptr += *command_ptr + 1;
+
+  if(nargs > 1) {
+    command_ptr++; // the first byte contains the length (that is 1) of the next byte
+    readonly = *command_ptr;
+    command_ptr++;
+  }
+
+  if(nargs > 2) {
+    memset(partition_label, 0x00, sizeof(partition_label));
+    memcpy(partition_label, command_ptr+1, *command_ptr);
+    partition_label[*command_ptr] = '\0';
+
+    partition_label_ptr = command_ptr;
+  }
+
+  response[4] = preferences.begin(store_name, readonly, (char*)partition_label_ptr) ? 0 : 1;
+
+error:
+  response[2] = 1;          // number of parameters
+  response[3] = 1;          // length of first parameter
+
+  return 6;
+}
+
+int pref_end(const uint8_t command[], uint8_t response[])
+{
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+
+  preferences.end();
+
+  response[2] = 1;          // number of parameters
+  response[3] = 1;          // length of first parameter
+  response[4] = 1;
+
+  return 6;
+}
+
+int pref_clear(const uint8_t command[], uint8_t response[])
+{
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+
+  response[2] = 1;                   // number of parameters
+  response[3] = 1;                   // length of first parameter
+  response[4] = preferences.clear() ? 0 : 1; // result of Preferences clear operation
+
+  // response has to start ad position 2, and has to take into account
+  // 0xee that is put after the function being called
+  return 6;
+}
+
+int pref_remove(const uint8_t command[], uint8_t response[])
+{
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+  //[2]         N args                      < 1 byte >
+  //[3]         key size                    < 1 byte >
+  //[4..n]      key                         < n byte >
+
+  uint8_t nargs = command[2];
+  char key[16];
+
+  // command_ptr points to the next argument, in this case
+  // it points to the length of key string
+  const uint8_t* command_ptr = &command[3];
+
+  if(nargs != 1) {
+    ESP_LOGE(PREF_TAG, "Preferences remove wrong number of arguments");
+    response[4] = 255;
+    goto error;
+  }
+
+  memset(key, 0x00, sizeof(key));
+  memcpy(key, command_ptr+1, *command_ptr);
+  key[*command_ptr] = '\0';
+
+  response[4] = preferences.remove(key) ? 0 : 1; // result of Preferences end operation
+error:
+  response[2] = 1;                 // number of parameters
+  response[3] = 1;                 // length of first parameter
+
+  // response has to start ad position 2, and has to take into account
+  // 0xee that is put after the function being called
+  return 6;
+}
+
+int pref_len(const uint8_t command[], uint8_t response[])
+{
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+  //[2]         N args                      < 1 byte >
+  //[3]         key size                    < 1 byte >
+  //[4..n]      key                         < n byte >
+
+  uint8_t nargs = command[2];
+  char key[16];
+
+  // command_ptr points to the next argument, in this case
+  // it points to the length of key string
+  const uint8_t* command_ptr = &command[3];
+
+  // restricting the return as 32 bit integer as it is enough
+  uint32_t len = 0;
+
+  if(nargs != 1) {
+    ESP_LOGE(PREF_TAG, "Preferences length wrong number of arguments");
+    response[2] = 1;
+    response[3] = 1;
+    response[4] = 255;
+    return 6;
+  }
+
+  memset(key, 0x00, sizeof(key));
+  memcpy(key, command_ptr+1, *command_ptr);
+  key[*command_ptr] = '\0';
+
+  len = preferences.getBytesLength(key);
+
+  response[2] = 1;          // number of parameters
+  response[3] = 4;          // length of first parameter
+
+  // write the result in big endian into the response buffer
+  response[4] = (len >> 0)  & 0xff;
+  response[5] = (len >> 8)  & 0xff;
+  response[6] = (len >> 16) & 0xff;
+  response[7] = (len >> 24) & 0xff;
+
+  return 9;
+}
+
+int pref_stat(const uint8_t command[], uint8_t response[])
+{
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+
+  // restricting the return as 32 bit integer as it is enough
+  uint32_t res = 0;
+
+  res = preferences.freeEntries();
+
+  response[2] = 1;          // number of parameters
+  response[3] = 4;          // length of first parameter
+
+  // write the result in big endian into the response buffer
+  response[4] = (res >> 0)  & 0xff;
+  response[5] = (res >> 8)  & 0xff;
+  response[6] = (res >> 16) & 0xff;
+  response[7] = (res >> 24) & 0xff;
+
+  return 9;
+}
+
+int pref_put(const uint8_t command[], uint8_t response[])
+{
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+  //[2]         N args                      < 1 byte >
+  //[3]         key size                    < 1 byte >
+  //[4..n]      key                         < n byte >
+  //[n]         type                        < 1 byte >
+  //[n+1]       len                         < 1 byte >
+  //[n+2..sizeof(type)]                     < sizeof(type)
+  //            value                         or len byte >
+
+  uint8_t nargs = command[2];
+  char key[16];
+  uint16_t len;
+
+  // we are going to store the value (if not array type) in a 64 bit integer, because it is easier to handle
+  uint64_t value=0;
+
+  // command_ptr points to the next argument, in this case
+  // it points to the length of key string
+  const uint8_t* command_ptr = &command[3];
+
+  // restricting the return as 32 bit integer as it is enough
+  size_t res = 0;
+
+  if(nargs != 3) {
+    ESP_LOGE(PREF_TAG, "Preferences put wrong number of arguments");
+    response[2] = 1;
+    response[3] = 1;
+    response[4] = 255;
+    return 6;
+  }
+
+  memset(key, 0x00, sizeof(key));
+  memcpy(key, command_ptr+1, *command_ptr);
+  key[*command_ptr] = '\0';
+
+  // next argument
+  command_ptr += *command_ptr + 1;
+
+  command_ptr++; // The first byte contains the length of the parameter, which is 1
+  PreferenceType type = (PreferenceType)*command_ptr;
+  command_ptr++;
+
+  // extract length
+  len = command_ptr[0]<<8 | command_ptr[1];
+  command_ptr+=2;
+
+  // extract value convert from bigendian, TODO not forr array types
+  for(uint8_t i=0; i<len && type != PT_BLOB && type != PT_STR; i++) {
+    value |= (((uint64_t)command_ptr[i]) << (i << 3));
+  }
+
+  switch(type) {
+    case PT_I8:
+      res = preferences.putChar(key, static_cast<int8_t>(value));
+      break;
+    case PT_U8:
+      res = preferences.putUChar(key, static_cast<uint8_t>(value));
+      break;
+    case PT_I16:
+      res = preferences.putShort(key, static_cast<int16_t>(value));
+      break;
+    case PT_U16:
+      res = preferences.putUShort(key, static_cast<uint16_t>(value));
+      break;
+    case PT_I32:
+      res = preferences.putInt(key, static_cast<int32_t>(value));
+      break;
+    case PT_U32:
+      res = preferences.putUInt(key, static_cast<uint32_t>(value));
+      break;
+    case PT_I64:
+      res = preferences.putLong64(key, static_cast<int64_t>(value));
+      break;
+    case PT_U64:
+      res = preferences.putULong64(key, static_cast<uint64_t>(value));
+      break;
+    case PT_STR:
+      // for simplicity we send the string null terminated from the client side
+      res = preferences.putString(key, (const char*)command_ptr);
+      break;
+    case PT_BLOB:
+      ets_printf("put bytes \n");
+      res = preferences.putBytes(key, command_ptr, len);
+      break;
+    case PT_INVALID:
+    default:
+      ESP_LOGE(PREF_TAG, "Preferences put invalid type");
+      response[2] = 1;
+      response[3] = 1;
+      response[4] = 254;
+      return 6;
+  }
+
+  response[2] = 1; // response nargs
+  response[3] = 4;          // length of first parameter
+
+  response[4] = (res >> 0)  & 0xff;
+  response[5] = (res >> 8)  & 0xff;
+  response[6] = (res >> 16) & 0xff;
+  response[7] = (res >> 24) & 0xff;
+
+  return 9;
+}
+
+int pref_get(const uint8_t command[], uint8_t response[])
+{
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+  //[2]         N args                      < 1 byte >
+  //[3]         key size                    < 1 byte >
+  //[4..n]      key                         < n byte >
+  //[n]         type                        < 1 byte >
+
+  uint8_t nargs = command[2];
+  char key[16];
+
+  // command_ptr points to the next argument, in this case
+  // it points to the length of key string
+  const uint8_t* command_ptr = &command[3];
+
+  // restricting the return as 32 bit integer as it is enough
+  uint32_t res_size = 0;
+
+  // all the kind of values can fit in a 64 bit integer
+  uint32_t res=0;
+
+  if(nargs != 2) {
+    ESP_LOGE(PREF_TAG, "Preferences put wrong number of arguments");
+    response[2] = 1;
+    response[3] = 0;
+    return 5;
+  }
+
+  memset(key, 0x00, sizeof(key));
+  memcpy(key, command_ptr+1, *command_ptr);
+  key[*command_ptr] = '\0';
+
+  // next argument
+  command_ptr += *command_ptr + 1;
+
+  command_ptr++; // The first byte contains the length of the parameter, which is 1
+  PreferenceType type = static_cast<PreferenceType>(*command_ptr);
+
+  command_ptr++;
+
+  switch(type) {
+    case PT_I8:
+      res = static_cast<int8_t>(preferences.getChar(key));
+      res_size = 1;
+      break;
+    case PT_U8:
+      res = static_cast<uint8_t>(preferences.getUChar(key));
+      res_size = 1;
+      break;
+    case PT_I16:
+      res = static_cast<int16_t>(preferences.getShort(key));
+      res_size = 2;
+      break;
+    case PT_U16:
+      res_size = 2;
+      res = static_cast<uint16_t>(preferences.getUShort(key));
+      break;
+    case PT_I32:
+      res_size = 4;
+      res = static_cast<int32_t>(preferences.getInt(key));
+      break;
+    case PT_U32:
+      res_size = 4;
+      res = static_cast<uint32_t>(preferences.getUInt(key));
+      break;
+    case PT_I64:
+      res_size = 8;
+      res = static_cast<int64_t>(preferences.getLong64(key));
+      break;
+    case PT_U64:
+      res_size = 8;
+      res = static_cast<uint64_t>(preferences.getULong64(key));
+      break;
+    case PT_STR:
+      res_size = preferences.getString(key, (char*) &response[5], SPI_MAX_DMA_LEN - 8);
+      goto array_return;
+    case PT_BLOB:
+      res_size = preferences.getBytes(key, &response[5], SPI_MAX_DMA_LEN - 8);
+      goto array_return;
+    case PT_INVALID:
+    default:
+      ESP_LOGE(PREF_TAG, "Preferences put invalid type");
+      response[2] = 1;
+      response[3] = 0;
+      return 5;
+  }
+
+  // fill the response buffer
+  for(uint8_t i=0; i<res_size; i++) {
+    response[5+i] = (res >> ((res_size-i-1) << 3)) & 0xff;
+  }
+
+array_return:
+
+  response[2] = 1; // the number of parameters
+
+  // the next 2 bytes are the size of the returned value. Since the client api support length with only 2 bytes
+  // we can return string and blobs up to that size
+  response[3] = (res_size >> 8)  & 0xff; // readParamLen16 wants little endian length
+  response[4] = (res_size >> 0)  & 0xff;
+
+  return 6 + res_size;
+}
+
+int pref_getType(const uint8_t command[], uint8_t response[]) {
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+  //[2]         N args                      < 1 byte >
+  //[3]         key size                    < 1 byte >
+  //[4..n]      key                         < n byte >
+
+  uint8_t nargs = command[2];
+  char key[16];
+
+  // command_ptr points to the next argument, in this case
+  // it points to the length of key string
+  const uint8_t* command_ptr = &command[3];
+
+  memset(key, 0x00, sizeof(key));
+  memcpy(key, command_ptr+1, *command_ptr);
+  key[*command_ptr] = '\0';
+
+
+  response[2] = 1; // response nargs
+  response[3] = 1; // response nargs
+  response[4] = preferences.getType(key);
+
+  return 6;
+}
+
+/*
+ * BLE vHCI API
+ */
+#include "esp_bt.h"
+
+#define TO_HOST_BUF_SIZE                256 // bytes
+static RingbufHandle_t buf_handle       = NULL;
+static SemaphoreHandle_t vhci_send_sem  = NULL;
+
+static void controller_rcv_pkt_ready() {
+  if (vhci_send_sem) {
+    xSemaphoreGive(vhci_send_sem);
+  }
+}
+
+/*
+* The following callback is called when the bt controller has some data available
+* this data is put into a queue that is then consumed by calling ble_read
+*/
+static int host_rcv_pkt(uint8_t *data, uint16_t len) {
+  if(buf_handle == NULL) {
+    ets_printf("failed host_rcv_pkt\n");
+    return ESP_FAIL;
+  }
+
+  UBaseType_t res = xRingbufferSend(buf_handle, data, len, pdMS_TO_TICKS(2000)); // TODO verify xTicksToWait value
+
+  if (res != pdTRUE) {
+    ets_printf("unable to send data to ring buffer\n");
+  }
+  return ESP_OK;
+}
+
+static esp_bt_controller_config_t btControllerConfig = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+static esp_vhci_host_callback_t vhciHostCb = {
+  controller_rcv_pkt_ready,
+  host_rcv_pkt
+};
+
+int ble_begin(const uint8_t command[], uint8_t response[]) {
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+
+  esp_err_t ret = ESP_OK;
+
+  if((ret = esp_bt_controller_init(&btControllerConfig)) != ESP_OK) {
+    ets_printf("failed esp_bt_controller_init %s\n", esp_err_to_name(ret));
+
+    goto exit;
+  }
+
+  while (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE);
+
+  if((ret = esp_bt_controller_enable(ESP_BT_MODE_BLE)) != ESP_OK) {
+    ets_printf("failed esp_bt_controller_enable %s\n", esp_err_to_name(ret));
+
+    goto exit;
+  }
+
+  if((buf_handle = xRingbufferCreate(TO_HOST_BUF_SIZE, RINGBUF_TYPE_BYTEBUF)) == NULL) {
+    ret = ESP_ERR_NO_MEM;
+    ets_printf("failed xRingbufferCreate\n");
+
+    goto exit;
+  }
+
+  vhci_send_sem = xSemaphoreCreateBinary();
+  if (vhci_send_sem == NULL) {
+    ets_printf("Failed to create VHCI send sem\n");
+    ret =  ESP_ERR_NO_MEM;
+    goto exit;
+  }
+  xSemaphoreGive(vhci_send_sem);
+
+  esp_bt_sleep_enable();
+
+  esp_vhci_host_register_callback(&vhciHostCb);
+
+exit:
+  response[2] = 1;          // number of parameters
+  response[3] = 1;          // length of first parameter
+  response[4] = ret;
+
+  return 6;
+}
+
+int ble_end(const uint8_t command[], uint8_t response[]) {
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+
+  esp_bt_controller_disable();
+  esp_bt_controller_deinit();
+
+  if(buf_handle != NULL) {
+    vRingbufferDelete(buf_handle);
+  }
+
+  if (vhci_send_sem != NULL) {
+    /* Dummy take and give sema before deleting it */
+    xSemaphoreTake(vhci_send_sem, pdMS_TO_TICKS(2000));
+    xSemaphoreGive(vhci_send_sem);
+    vSemaphoreDelete(vhci_send_sem);
+    vhci_send_sem = NULL;
+  }
+
+  response[2] = 1;          // number of parameters
+  response[3] = 1;          // length of first parameter
+  response[4] = 1;
+
+  return 6;
+}
+
+int ble_available(const uint8_t command[], uint8_t response[]) {
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+  uint16_t available = 0;
+  if(buf_handle != NULL) {
+    available = TO_HOST_BUF_SIZE - xRingbufferGetCurFreeSize(buf_handle);
+  }
+
+  response[2] = 1;          // number of parameters
+  response[3] = 2;          // length of first parameter
+  response[4] = (available >> 8)  & 0xff;
+  response[5] = (available >> 0)  & 0xff;
+
+  return 7;
+}
+
+int ble_peek(const uint8_t command[], uint8_t response[]) {
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+  //[2]         N args                      < 1 byte >
+  //[3]         the number 2                < 1 byte >
+  //[4..5]      size                        < 2 byte >
+  // this could be useless xQueuePeek
+  uint8_t nargs = command[2];
+  // if nargs != 1 -> error
+  size_t res = 0;
+  // uint16_t size = ntohs(*((uint16_t *) &command[4]));
+  uint16_t size = *((uint16_t *) &command[4]);
+  uint8_t* received = nullptr;
+
+  if(size > TO_HOST_BUF_SIZE - xRingbufferGetCurFreeSize(buf_handle)) {
+    size = 0;
+    goto exit;
+  }
+
+  received = (uint8_t*)xRingbufferReceiveUpTo(buf_handle, &res, pdMS_TO_TICKS(2000), size);
+
+  memcpy(&response[5], received, res);
+
+exit:
+  response[2] = 1;          // number of parameters
+  response[3] = (size >> 8)  & 0xff;
+  response[4] = (size >> 0)  & 0xff;
+
+  return 6 + res;
+}
+
+int ble_read(const uint8_t command[], uint8_t response[]) {
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+  //[2]         N args                      < 1 byte >
+  //[3]         the number 2                < 1 byte >
+  //[4..5]      size                        < 2 byte >
+  uint8_t nargs = command[2];
+  // if nargs != 1 -> error
+  size_t res = 0;
+  // uint16_t size = ntohs(*((uint16_t *) &command[4]));
+  uint16_t size = *((uint16_t *) &command[4]);
+  uint8_t* received = nullptr;
+
+  if(size > TO_HOST_BUF_SIZE - xRingbufferGetCurFreeSize(buf_handle)) {
+    size = 0;
+    goto exit;
+  }
+
+  received = (uint8_t*)xRingbufferReceiveUpTo(buf_handle, &res, pdMS_TO_TICKS(2000), size);
+
+  memcpy(&response[5], received, res);
+
+  vRingbufferReturnItem(buf_handle, received);
+
+exit:
+  response[2] = 1;          // number of parameters
+  response[3] = (size >> 8)  & 0xff;
+  response[4] = (size >> 0)  & 0xff;
+
+  return 6 + res;
+}
+
+int ble_write(const uint8_t command[], uint8_t response[]) {
+  //[0]         CMD_START                   < 0xE0   >
+  //[1]         Command                     < 1 byte >
+  //[2]         N args                      < 1 byte >
+  //[3..4]      size                        < 2 byte >
+  //[4..4+size] buffer                      < size byte >
+
+  uint8_t nargs = command[2];
+  // if nargs != 1 -> error
+
+  uint16_t size = ntohs(*((uint16_t *) &command[3]));
+
+  while(!esp_vhci_host_check_send_available()) { // TODO add timeout
+    // TODO delay
+  }
+
+  if (vhci_send_sem && xSemaphoreTake(vhci_send_sem, pdMS_TO_TICKS(2000)) == pdTRUE) {
+    esp_vhci_host_send_packet((uint8_t*)&command[5], size);
+  }
+
+  response[2] = 1;          // number of parameters
+  response[3] = 2;          // length of first parameter
+  response[4] = (size >> 0)  & 0xff;
+  response[5] = (size >> 8)  & 0xff;
+
+  return 7;
+}
+
+
+
 typedef int (*CommandHandlerType)(const uint8_t command[], uint8_t response[]);
 
 const CommandHandlerType commandHandlers[] = {
@@ -2083,16 +2890,38 @@ const CommandHandlerType commandHandlers[] = {
   getConnStatus, getIPaddr, getMACaddr, getCurrSSID, getCurrBSSID, getCurrRSSI, getCurrEnct, scanNetworks, startServerTcp, getStateTcp, dataSentTcp, availDataTcp, getDataTcp, startClientTcp, stopClientTcp, getClientStateTcp,
 
   // 0x30 -> 0x3f
-  disconnect, NULL, getIdxRSSI, getIdxEnct, reqHostByName, getHostByName, startScanNetworks, getFwVersion, NULL, sendUDPdata, getRemoteData, getTime, getIdxBSSID, getIdxChannel, ping, getSocket,
+  disconnect, NULL, getIdxRSSI, getIdxEnct, reqHostByName, getHostByName, startScanNetworks, getFwVersion, stopServerTcp, sendUDPdata, getRemoteData, getTime, getIdxBSSID, getIdxChannel, ping, getSocket,
 
   // 0x40 -> 0x4f
-  setEnt, NULL, NULL, NULL, sendDataTcp, getDataBufTcp, insertDataBuf, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  setEnt, NULL, NULL, NULL, sendDataTcp, getDataBufTcp, insertDataBuf, NULL, NULL, NULL,
 
-  // 0x50 -> 0x5f
-  setPinMode, setDigitalWrite, setAnalogWrite, getDigitalRead, getAnalogRead, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  // BLE functions 0x4a -> 0x4f
+  ble_begin,      // 0x4a
+  ble_end,        // 0x4b
+  ble_available,  // 0x4c
+  ble_peek,       // 0x4d
+  ble_read,       // 0x4e
+  ble_write,      // 0x4f
+
+  // 0x50 -> 0x54
+  setPinMode, setDigitalWrite, setAnalogWrite, getDigitalRead, getAnalogRead,
+
+  // KVStore functions 0x55 -> 0x5D
+  pref_begin,       // 0x55
+  pref_end,         // 0x56
+  pref_clear,       // 0x57
+  pref_remove,      // 0x58
+  pref_len,         // 0x59
+  pref_stat,        // 0x5A
+  pref_put,         // 0x5B
+  pref_get,         // 0x5C
+  pref_getType,     // 0x5D
+
+  // 0x5E -> 0x5F
+  getFwVersionU32, setTime,
 
   // 0x60 -> 0x6f
-  writeFile, readFile, deleteFile, existsFile, downloadFile,  applyOTA, renameFile, downloadOTA, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  writeFile, readFile, deleteFile, existsFile, downloadFile,  applyOTA, renameFile, downloadOTA, brSetECTrustAnchor, brErrorCode, NULL, NULL, NULL, NULL, NULL, NULL,
 
   // Low-level BSD-like sockets functions.
   // 0x70 -> 0x7f
@@ -2239,7 +3068,7 @@ void CommandHandlerClass::handleWiFiDisconnect()
   // close all non-listening sockets
 
   for (int i = 0; i < CONFIG_LWIP_MAX_SOCKETS; i++) {
-    struct sockaddr_in addr; 
+    struct sockaddr_in addr;
     size_t addrLen = sizeof(addr);
     int socket = LWIP_SOCKET_OFFSET + i;
 

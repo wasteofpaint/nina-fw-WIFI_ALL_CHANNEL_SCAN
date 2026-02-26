@@ -26,6 +26,9 @@
 
 #include "WiFiClient.h"
 
+extern "C" {
+  #include "esp_log.h"
+}
 
 WiFiClient::WiFiClient() :
   WiFiClient(-1)
@@ -64,15 +67,59 @@ int WiFiClient::connect(IPAddress ip, uint16_t port)
   addr.sin_addr.s_addr = (uint32_t)ip;
   addr.sin_port = htons(port);
 
-  if (lwip_connect_r(_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-    lwip_close_r(_socket);
-    _socket = -1;
-    return 0;
+  if (_connTimeout == 0) {
+    if (lwip_connect(_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+      lwip_close(_socket);
+      _socket = -1;
+      return 0;
+    }
   }
 
   int nonBlocking = 1;
-  lwip_ioctl_r(_socket, FIONBIO, &nonBlocking);
+  lwip_ioctl(_socket, FIONBIO, &nonBlocking);
 
+  if (_connTimeout > 0) {
+    int res = lwip_connect(_socket, (struct sockaddr*)&addr, sizeof(addr));
+    if (res < 0 && errno != EINPROGRESS) {
+      ESP_LOGW("WiFiClient", "connect on socket %d, errno: %d, \"%s\"", _socket, errno, strerror(errno));
+      lwip_close(_socket);
+      _socket = -1;
+      return 0;
+    }
+
+    struct timeval tv;
+    tv.tv_sec = _connTimeout / 1000;
+    tv.tv_usec = (_connTimeout  % 1000) * 1000;
+  
+    fd_set fdset;
+    FD_ZERO(&fdset);
+    FD_SET(_socket, &fdset);
+
+    res = select(_socket + 1, nullptr, &fdset, nullptr, &tv);
+    if (res < 0) {
+      ESP_LOGW("WiFiClient", "select on socket %d, errno: %d, \"%s\"", _socket, errno, strerror(errno));
+      lwip_close(_socket);
+      return 0;
+    }
+    if (res == 0) {
+      ESP_LOGW("WiFiClient", "select returned due to timeout %d ms for socket %d", _connTimeout,  _socket);
+      lwip_close(_socket);
+      return 0;
+    }
+    int sockerr;
+    socklen_t len = (socklen_t) sizeof(int);
+    res = lwip_getsockopt(_socket, SOL_SOCKET, SO_ERROR, &sockerr, &len);
+    if (res < 0) {
+      ESP_LOGW("WiFiClient", "getsockopt on socket %d, errno: %d, \"%s\"", _socket, errno, strerror(errno));
+      lwip_close(_socket);
+      return 0;
+    }
+    if (sockerr != 0) {
+      ESP_LOGW("WiFiClient", "socket error on socket %d, errno: %d, \"%s\"", _socket, sockerr, strerror(sockerr));
+      lwip_close(_socket);
+      return 0;
+    }
+  }
   return 1;
 }
 
@@ -87,7 +134,7 @@ size_t WiFiClient::write(const uint8_t *buf, size_t size)
     return 0;
   }
 
-  int result = lwip_send_r(_socket, (void*)buf, size, MSG_PEEK);
+  int result = lwip_send(_socket, (void*)buf, size, MSG_PEEK);
 
   if (result < 0) {
     return 0;
@@ -106,8 +153,8 @@ int WiFiClient::available()
   int result = 0;
 
   //This function returns the number of bytes of pending data already received in the socket’s network.
-  if (lwip_ioctl_r(_socket, FIONREAD, &result) < 0) {
-    lwip_close_r(_socket);
+  if (lwip_ioctl(_socket, FIONREAD, &result) < 0) {
+    lwip_close(_socket);
     _socket = -1;
     return 0;
   }
@@ -132,10 +179,10 @@ int WiFiClient::read(uint8_t* buf, size_t size)
     return -1;
   }
 
-  int result = lwip_recv_r(_socket, buf, size, MSG_DONTWAIT);
+  int result = lwip_recv(_socket, buf, size, MSG_DONTWAIT);
 
   if (result <= 0 && errno != EWOULDBLOCK) {
-    lwip_close_r(_socket);
+    lwip_close(_socket);
     _socket = -1;
     return 0;
   }
@@ -152,9 +199,9 @@ int WiFiClient::peek()
   uint8_t b;
 
   //This function tries to receive data from the network and can return an error if the connection when down.
-  if (lwip_recv_r(_socket, &b, sizeof(b), MSG_PEEK | MSG_DONTWAIT) <= 0) {
+  if (lwip_recv(_socket, &b, sizeof(b), MSG_PEEK | MSG_DONTWAIT) <= 0) {
     if (errno != EWOULDBLOCK) {
-      lwip_close_r(_socket);
+      lwip_close(_socket);
       _socket = -1;
     }
 
@@ -171,7 +218,7 @@ void WiFiClient::flush()
 void WiFiClient::stop()
 {
   if (_socket != -1) {
-    lwip_close_r(_socket);
+    lwip_close(_socket);
     _socket = -1;
   }
 }
